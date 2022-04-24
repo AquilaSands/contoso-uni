@@ -1,0 +1,165 @@
+parameters:
+  - name: environment
+    type: string
+    default: " "
+    values:
+      - " "
+      - dev
+      - test
+      - prod
+
+stages:
+  - stage: ${{ parameters.environment }}_ResourceGroup
+    displayName: ${{ parameters.environment }} Resource Group
+    variables:
+      - group: contoso-uni-${{ parameters.environment }}
+    jobs:
+      - job: ResourceGroup
+        steps:
+          - task: AzurePowerShell@5
+            name: ResourceGroup
+            displayName: Resource Group
+            inputs:
+              azureSubscription: $(serviceConnectionName)
+              errorActionPreference: stop
+              workingDirectory: $(Build.SourcesDirectory)/iac
+              azurePowerShellVersion: latestVersion
+              pwsh: true
+              scriptType: inlineScript
+              inline: |
+                $rgOutput = .\resourcegroup-deploy.ps1 -Location $(location) -Env ${{ parameters.environment }} -Name $(projectName)
+                $rgName = $rgOutput.Outputs.name.Value
+                $rgOutput
+                Write-Host "##vso[task.setvariable variable=rgName;isoutput=true]$rgName"
+
+  - stage: Test_${{ parameters.environment }}_Infrastructure
+    displayName: Test ${{ parameters.environment }} Infrastructure
+    variables:
+      - group: contoso-uni-${{ parameters.environment }}
+    jobs:
+      - job: Validate
+        variables:
+          resourceGroup: $[stageDependencies.${{ parameters.environment }}_ResourceGroup.ResourceGroup.outputs['ResourceGroup.rgName']]
+        steps:
+          - bash: |
+              az bicep build --file main.bicep
+            name: Lint
+            workingDirectory: $(Build.SourcesDirectory)/iac
+
+          - task: ps-rule-assert@1
+            name: PSRule
+            displayName: Run PSRule
+            inputs:
+              inputType: inputPath
+              inputPath: "iac/*.bicep"
+              modules: "PSRule.Rules.Azure"
+              outputFormat: NUnit3
+              outputPath: reports/ps-rule-results.xml
+
+          - task: PublishTestResults@2
+            name: "PublishPSRuleResults"
+            displayName: "Publish PSRule Results"
+            condition: always()
+            inputs:
+              testRunTitle: "PSRule"
+              testRunner: NUnit
+              testResultsFiles: "reports/ps-rule-results.xml"
+
+          - task: AzurePowerShell@5
+            name: Validate
+            inputs:
+              azureSubscription: $(serviceConnectionName)
+              errorActionPreference: stop
+              workingDirectory: $(Build.SourcesDirectory)/iac
+              azurePowerShellVersion: latestVersion
+              pwsh: true
+              scriptType: inlineScript
+              inline: |
+                $params = @{
+                  location                      = '$(location)'
+                  env                           = '${{ parameters.environment }}'
+                  projectName                   = '$(projectName)'
+                  vnetAddressPrefix             = '$(vnetAddressPrefix)'
+                  mainSubnetIpRange             = '$(mainSubnetIpRange)'
+                  webAppSubnetIpRange           = '$(webAppSubnetIpRange)'
+                  sqlAdministratorLogin         = '$(sqlAdministratorLogin)'
+                  sqlAdministratorLoginPassword = '$(sqlAdministratorLoginPassword)'
+                }
+                .\main-validate.ps1 -ResourceGroupName $(resourceGroup) -ParamsHashTable $params
+
+          - task: AzurePowerShell@5
+            name: WhatIf
+            displayName: What If
+            inputs:
+              azureSubscription: $(serviceConnectionName)
+              errorActionPreference: stop
+              workingDirectory: $(Build.SourcesDirectory)/iac
+              azurePowerShellVersion: latestVersion
+              pwsh: true
+              scriptType: inlineScript
+              inline: |
+                $params = @{
+                  location                      = '$(location)'
+                  env                           = '${{ parameters.environment }}'
+                  projectName                   = '$(projectName)'
+                  vnetAddressPrefix             = '$(vnetAddressPrefix)'
+                  mainSubnetIpRange             = '$(mainSubnetIpRange)'
+                  webAppSubnetIpRange           = '$(webAppSubnetIpRange)'
+                  sqlAdministratorLogin         = '$(sqlAdministratorLogin)'
+                  sqlAdministratorLoginPassword = '$(sqlAdministratorLoginPassword)'
+                }
+                .\main-whatif.ps1 -ResourceGroupName $(resourceGroup) -ParamsHashTable $params
+
+  - stage: Deploy_${{ parameters.environment }}
+    displayName: Deploy ${{ parameters.environment }}
+    dependsOn:
+      - ${{ parameters.environment }}_ResourceGroup
+      - Test_${{ parameters.environment }}_Infrastructure
+    variables:
+      - group: contoso-uni-${{ parameters.environment }}
+    jobs:
+      - deployment: Deploy
+        environment: ${{ parameters.environment }}
+        variables:
+          resourceGroup: $[stageDependencies.${{ parameters.environment }}_ResourceGroup.ResourceGroup.outputs['ResourceGroup.rgName']]
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: AzurePowerShell@5
+                  name: DeployInfrastructure
+                  displayName: Deploy Infrastructure
+                  inputs:
+                    azureSubscription: $(serviceConnectionName)
+                    errorActionPreference: stop
+                    workingDirectory: $(Build.SourcesDirectory)/iac
+                    azurePowerShellVersion: latestVersion
+                    pwsh: true
+                    scriptType: inlineScript
+                    inline: |
+                      $params = @{
+                        location                      = '$(location)'
+                        env                           = '${{ parameters.environment }}'
+                        projectName                   = '$(projectName)'
+                        vnetAddressPrefix             = '$(vnetAddressPrefix)'
+                        mainSubnetIpRange             = '$(mainSubnetIpRange)'
+                        webAppSubnetIpRange           = '$(webAppSubnetIpRange)'
+                        sqlAdministratorLogin         = '$(sqlAdministratorLogin)'
+                        sqlAdministratorLoginPassword = '$(sqlAdministratorLoginPassword)'
+                      }
+                      $deployOutput = .\main-deploy.ps1 -ResourceGroupName $(resourceGroup) -ParamsHashTable $params
+                      $webAppName = $deployOutput.Outputs.webAppName.Value
+                      $deployOutput
+                      Write-Host "##vso[task.setvariable variable=webAppName;]$webAppName"
+
+                - task: AzureWebApp@1
+                  name: DeployWebApp
+                  displayName: Deploy Web App
+                  inputs:
+                    azureSubscription: $(serviceConnectionName)
+                    appType: webApp
+                    appName: $(webAppName)
+                    package: $(Pipeline.Workspace)/webapp/WebApp/WebApp.zip
+                    deploymentMethod: runFromPackage

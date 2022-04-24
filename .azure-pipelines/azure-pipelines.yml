@@ -1,0 +1,12 @@
+trigger:
+  - main
+variables:
+    - group: contoso-uni-shared
+pool:
+  vmImage: ubuntu-latest
+stages:
+  - template: templates/build.yaml
+
+  - template: templates/deploy.yaml
+    parameters:
+      environment: dev
