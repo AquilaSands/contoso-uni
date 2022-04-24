@@ -1,0 +1,26 @@
+# YAML: Enable expansion for Bicep source files.
+configuration:
+  AZURE_BICEP_FILE_EXPANSION: true
+  AZURE_PARAMETER_DEFAULTS:
+    env: prod
+    projectName: wopr
+    location: westeurope
+    vnetAddressPrefix: 192.168.0.0/23
+    mainSubnetIpRange: 192.168.0.0/24
+    webAppSubnetIpRange: 192.168.1.0/26
+    sqlAdministratorLogin: sqladmin
+    sqlAdministratorLoginPassword: DummySqlAdminPassword
+
+input:
+  pathIgnore:
+  - '*.ps1'
+  - '*.json'
+  - '*.yaml'
+  - 'src/*'
+
+rule:
+  exclude:
+  # Ignore the following rules for all resources
+  - Azure.Resource.UseTags
+  - Azure.SQL.AAD
+  - Azure.AppService.NETVersion
